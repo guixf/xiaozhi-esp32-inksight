@@ -169,7 +169,7 @@ Power Management → Runtime Mode
 
 ### 硬件部分
 1. 已开源pcb版设计文件和原件表。请访问[https://oshwhub.com/laoguia/project_ybjwwrml](https://oshwhub.com/laoguia/project_ybjwwrml)
-2. 外壳文件 目录下的step文件。
+2. 外壳文件： 3d-file 目录下的step文件。
 
 ### 开发者文档
 
