@@ -368,8 +368,8 @@ choice BOARD_TYPE
     config BOARD_TYPE_WAVESHARE_ESP32_S3_RLCD_4_2
         bool "Waveshare ESP32-S3-RLCD-4.2"
         depends on IDF_TARGET_ESP32S3
-    config BOARD_TYPE_WAVESHARE_ESP32_S_N8D16_SSD1683_4_2
-        bool "Waveshare ESP32-S-N8D16-SSD1683-4.2"
+    config BOARD_TYPE_WAVESHARE_ESP32_S_R8N16_SSD1683_4_2
+        bool "Waveshare ESP32-S-R8N16-SSD1683-4.2"
         depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_WAVESHARE_ESP32S3_R8N16_UC8176_4_2
         bool "Waveshare ESP32S3-R8N16-UC8176-4.2"

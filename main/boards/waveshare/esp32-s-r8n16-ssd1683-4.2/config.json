@@ -3,7 +3,7 @@
     "target": "esp32s3",
     "builds": [
         {
-            "name": "esp32-s-n8d16-ssd1683-4.2",
+            "name": "esp32-s-r8n16-ssd1683-4.2",
             "sdkconfig_append": [
                 "CONFIG_USE_WECHAT_MESSAGE_STYLE=n"
             ]

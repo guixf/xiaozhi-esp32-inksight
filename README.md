@@ -28,15 +28,25 @@ The stable version of v1 is 1.9.2. You can switch to v1 by running `git checkout
 - Uses OPUS audio codec
 - Voice interaction based on streaming ASR + LLM + TTS architecture
 - Speaker recognition, identifies the current speaker [3D Speaker](https://github.com/modelscope/3D-Speaker)
-- OLED / LCD display, supports emoji display
-- Battery display and power management
+- OLED / LCD / E-Paper display, supports emoji display
+- Battery display and power management with sleep mode support
 - Multi-language support (Chinese, English, Japanese)
 - Supports ESP32-C3, ESP32-S3, ESP32-P4 chip platforms
 - Device-side MCP for device control (Speaker, LED, Servo, GPIO, etc.)
 - Cloud-side MCP to extend large model capabilities (smart home control, PC desktop operation, knowledge search, email, etc.)
 - Customizable wake words, fonts, emojis, and chat backgrounds with online web-based editing ([Custom Assets Generator](https://github.com/78/xiaozhi-assets-generator))
+- Inksight image generation and display via [inksight.site](https://inksight.site)
 
 ## Hardware
+
+### New E-Paper Display Boards
+
+This project now supports two 4.2-inch e-paper display boards:
+
+| Board Name | Display Driver | Resolution | Features |
+|------------|---------------|------------|----------|
+| `esp32-s-n8d16-ssd1683-4.2` | SSD1683 (compatible) | 400 x 300 | Black/White/Red (BWR) tri-color |
+| `esp32s3-r8n16-uc8176-4.2` | UC8176 | 400 x 300 | Black/White/Red (BWR) tri-color |
 
 ### Breadboard DIY Practice
 
@@ -119,6 +129,44 @@ The firmware connects to the official [xiaozhi.me](https://xiaozhi.me) server by
 - Linux is better than Windows for faster compilation and fewer driver issues
 - This project uses Google C++ code style, please ensure compliance when submitting code
 
+### Board Selection
+
+To select the e-paper display board, use `idf.py menuconfig` and navigate to:
+
+```
+Board Configuration → Board Type → Waveshare Boards
+```
+
+Choose either:
+- `waveshare/esp32-s-r8n16-ssd1683-4.2` (SSD1683 compatible)
+- `waveshare/esp32s3-r8n16-uc8176-4.2` (UC8176)
+
+### Power Management
+
+The firmware supports battery-powered sleep mode:
+
+- **Always Active Mode**: Device remains awake for continuous interaction
+- **Interval Mode**: Device enters deep sleep between interactions to save power
+
+Configure via `idf.py menuconfig`:
+```
+Power Management → Runtime Mode
+```
+
+Or set via the server configuration with `is_always_active: false`.
+
+### Key-AI Wake Function
+
+Press the **KEY-AI** button to wake the device from sleep and enter XiaoZhi chat mode for voice interaction.
+
+### Inksight Integration
+
+The firmware integrates with [inksight.site](https://inksight.site) for AI-generated image display:
+
+1. Device sends screen parameters (resolution, colors) to the server
+2. Server generates optimized images for e-paper displays
+3. Images are fetched and displayed on the screen
+
 ### Developer Documentation
 
 - [Custom Board Guide](docs/custom-board.md) - Learn how to create custom boards for XiaoZhi AI
@@ -170,5 +218,4 @@ If you have any ideas or suggestions, please feel free to raise Issues or join o
    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=78/xiaozhi-esp32&type=Date" />
    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=78/xiaozhi-esp32&type=Date" />
  </picture>
-</a># xiaozhi-esp32-inksight
-# xiaozhi-esp32-inksight
+</a>

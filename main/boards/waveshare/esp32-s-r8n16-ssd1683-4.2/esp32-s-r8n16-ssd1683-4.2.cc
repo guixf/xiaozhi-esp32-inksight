@@ -1,6 +1,7 @@
 #include <driver/i2c_master.h>
 #include <driver/spi_common.h>
 #include <esp_log.h>
+#include <esp_wifi.h>
 #include <stdio.h>
 #include "application.h"
 #include "button.h"
@@ -21,11 +22,20 @@
 #include <driver/rtc_io.h>
 #include <nvs_flash.h>
 
-#define TAG "esp32_s_n8d16_ssd1683_42"
+#define TAG "esp32_s_r8n16_ssd1683_42"
 #define BATTERY_ADC_CHANNEL ADC_CHANNEL_2
 #define BATTERY_ADC_ATTEN ADC_ATTEN_DB_12
 #define BOOT_BUTTON_HOLD_MS 10000
 #define DISPLAY_REFRESH_INTERVAL_US ((uint64_t)60 * 60 * 1000 * 1000)
+
+// NVS键名定义
+#define NVS_WAKEUP_NAMESPACE "wakeup"
+#define NVS_KEY_BUTTON_FLAG "btn_wake"
+#define NVS_KEY_TIMER_FLAG "timer_wake"
+#define NVS_KEY_MARKER "marker"
+
+#define WAKEUP_MARKER_VALID 0x5AA5
+#define WAKEUP_MARKER_INVALID 0x0000
 
 class Esp32SN8d16Ssd168342 : public WifiBoard {
 private:
@@ -48,17 +58,13 @@ private:
     bool wifi_connected_;
     bool in_deep_sleep_;
     bool wakeup_fetch_done_;  // 标记唤醒后是否已获取图片
+    bool wakeup_start_chat_;  // 标记唤醒后是否需要启动对话
+    bool delayed_wakeup_;     // 标记是否需要延迟唤醒处理
     NetworkEventCallback saved_network_callback_;
 
     static void BatteryTimerCallback(void* arg) {
-        static uint8_t timer_count_ = 0;
-        timer_count_++;
         Esp32SN8d16Ssd168342* board = static_cast<Esp32SN8d16Ssd168342*>(arg);
         board->display_->ProcessDisplayUpdate();
-        if (timer_count_ >= 10) {
-            board->UpdateBatteryStatus();
-            timer_count_ = 0;
-        }
     }
 
     static void RefreshTimerCallback(void* arg) {
@@ -68,6 +74,8 @@ private:
 
     static void HeartbeatTimerCallback(void* arg) {
         Esp32SN8d16Ssd168342* board = static_cast<Esp32SN8d16Ssd168342*>(arg);
+        ESP_LOGI(TAG, "[BATTERY] Reading battery voltage before heartbeat timer...");
+        board->UpdateBatteryStatus();
         board->display_->SendHeartbeat();
     }
 
@@ -77,20 +85,35 @@ private:
     }
 
     void HandleNetworkEventCallback(NetworkEvent event, const std::string& data = "") {
-        // 调用父类的处理
-        WifiBoard::OnNetworkEvent(event, data);
+        // 注意：不要调用 WifiBoard::OnNetworkEvent，因为会造成递归调用
+        // WifiBoard::OnNetworkEvent 已经在调用这个回调之前执行过了
+        
+        ESP_LOGI(TAG, "[RUNTIME] HandleNetworkEventCallback: event=%d, in_deep_sleep_=%d, wakeup_start_chat_=%d", 
+                 (int)event, in_deep_sleep_, wakeup_start_chat_);
         
         switch (event) {
             case NetworkEvent::Connected:
                 wifi_connected_ = true;
                 display_->showAiChatStatus("IDLE", "WiFi OK");
-                ESP_LOGI(TAG, "[RUNTIME] Network connected event received");
-                // WiFi 连接成功后，先发送心跳让服务器知道设备在线
-                ESP_LOGI(TAG, "[HEARTBEAT] WiFi connected, sending heartbeat first...");
-                display_->SendHeartbeat(true);
-                // 然后获取 Inksight 图片
-                ESP_LOGI(TAG, "[INKSIGHT] Fetching image after heartbeat...");
-                display_->FetchInksightImage();
+                ESP_LOGI(TAG, "[RUNTIME] Network connected event received, in_deep_sleep_=%d, wakeup_start_chat_=%d", 
+                         in_deep_sleep_, wakeup_start_chat_);
+                
+                // 关键：只有按键唤醒（wakeup_start_chat_ 为 true 时才启动对话
+                if (in_deep_sleep_ && wakeup_start_chat_) {
+                    // 按键唤醒：WiFi连接后立即启动对话
+                    ESP_LOGI(TAG, "[RUNTIME] Button wakeup, WiFi connected, starting chat NOW");
+                    in_deep_sleep_ = false;
+                    wakeup_start_chat_ = false;  // 清除标志
+                    Application::GetInstance().ToggleChatState();
+                } else {
+                    // 首次启动或定时器唤醒：先检测电池电量，然后发送心跳和获取图片
+                    ESP_LOGI(TAG, "[BATTERY] Reading battery voltage before heartbeat...");
+                    UpdateBatteryStatus();
+                    ESP_LOGI(TAG, "[HEARTBEAT] WiFi connected, sending heartbeat first...");
+                    display_->SendHeartbeat(true);
+                    ESP_LOGI(TAG, "[INKSIGHT] Fetching image after heartbeat...");
+                    display_->FetchInksightImage();
+                }
                 break;
             case NetworkEvent::Disconnected:
                 wifi_connected_ = false;
@@ -136,25 +159,24 @@ private:
         }
     }
 
-    void CheckAndInitializeInksight() {
+    void CheckAndInitializeInksight(bool is_wake_from_deep_sleep) {
         auto& wifi_manager = WifiManager::GetInstance();
         if (wifi_manager.IsConnected()) {
             ESP_LOGI(TAG, "[INKSIGHT] WiFi already connected, initializing...");
             wifi_connected_ = true;
             
-            if (!in_deep_sleep_) {
-                // 首次启动：刷新屏幕，显示 WiFi OK
+            if (!is_wake_from_deep_sleep) {
+                // 首次启动：刷新屏幕，显示 WiFi OK，获取图片
                 ESP_LOGI(TAG, "[INKSIGHT] First boot, refreshing screen");
                 display_->showAiChatStatus("IDLE", "WiFi OK");
-                // 获取 Inksight 图片
+                display_->SendHeartbeat(true);
                 display_->FetchInksightImage();
             } else {
-                // 唤醒状态：跳过所有屏幕刷新，直接开始对话
-                ESP_LOGI(TAG, "[INKSIGHT] Wake from deep sleep, skipping screen refresh, starting chat directly");
+                // 唤醒状态：不获取图片，等待对话结束后在 OnDeviceIdle 中获取
+                ESP_LOGI(TAG, "[INKSIGHT] Wake from deep sleep, skipping image fetch (will fetch after chat ends)");
+                // wakeup_fetch_done_ 已经在 WakeFromDeepSleep() 中设置为 false
+                // 对话结束后 OnDeviceIdle() 会检查并获取图片
             }
-            
-            // 立即发送一次心跳
-            display_->SendHeartbeat(true);
         } else {
             ESP_LOGI(TAG, "[INKSIGHT] WiFi not connected yet, waiting for event...");
         }
@@ -227,7 +249,12 @@ private:
 
     void HandleAiButton() {
         if (in_deep_sleep_) {
-            WakeFromDeepSleep();
+            // 检查display_是否已初始化，避免崩溃
+            if (display_) {
+                WakeFromDeepSleep();
+            } else {
+                ESP_LOGW(TAG, "[RUNTIME] HandleAiButton: display_ not initialized yet, skipping wake from deep sleep");
+            }
             return;
         }
         
@@ -238,11 +265,33 @@ private:
     }
 
     void WakeFromDeepSleep() {
-        in_deep_sleep_ = false;
         wakeup_fetch_done_ = false;  // 重置标记，对话结束后需要获取图片
+        display_->SetSuppressAutoImageFetch(true);  // 抑制自动获取图片
         
+        // 尝试启动对话，但可能在WiFi未连接时无法启动
         auto& app = Application::GetInstance();
         app.ToggleChatState();
+        
+        // 注意：不要在这里设置 in_deep_sleep_ = false
+        // 让 HandleNetworkEventCallback 来处理（WiFi连接后再设置为false）
+        
+        // 清除NVS唤醒标志（只有成功执行唤醒处理后才清除）
+        ClearNvsWakeupFlags();
+    }
+    
+    void ClearNvsWakeupFlags() {
+        nvs_handle_t nvs_handle;
+        esp_err_t err = nvs_open(NVS_WAKEUP_NAMESPACE, NVS_READWRITE, &nvs_handle);
+        if (err == ESP_OK) {
+            nvs_set_i32(nvs_handle, NVS_KEY_MARKER, WAKEUP_MARKER_INVALID);
+            nvs_set_i32(nvs_handle, NVS_KEY_BUTTON_FLAG, 0);
+            nvs_set_i32(nvs_handle, NVS_KEY_TIMER_FLAG, 0);
+            nvs_commit(nvs_handle);
+            nvs_close(nvs_handle);
+            ESP_LOGI(TAG, "[RUNTIME] NVS wakeup flags cleared");
+        } else {
+            ESP_LOGW(TAG, "[RUNTIME] Failed to clear NVS wakeup flags: %s", esp_err_to_name(err));
+        }
     }
 
     void InitializeTools() {
@@ -501,9 +550,99 @@ public:
           last_battery_percentage_(-1),
           wifi_connected_(false),
           in_deep_sleep_(false),
-          wakeup_fetch_done_(false) {
+          wakeup_fetch_done_(false),
+          wakeup_start_chat_(false),
+          delayed_wakeup_(false) {
+        // 第一步：获取并判断唤醒原因（放在最开头，在任何其他初始化之前）
+        // 使用三重检测机制：
+        // 1. esp_sleep_get_wakeup_cause() - 标准API
+        // 2. esp_sleep_get_ext1_wakeup_status() - EXT1唤醒源状态（备用）
+        // 3. NVS存储 - 防止DTR/RTS复位清除RTC内存
+        esp_sleep_wakeup_cause_t wakeup_cause = esp_sleep_get_wakeup_cause();
+        const char* wakeup_name = "UNKNOWN";
+        bool is_gpio_wakeup = false;
+        
+        switch(wakeup_cause) {
+            case ESP_SLEEP_WAKEUP_UNDEFINED: wakeup_name = "UNDEFINED"; break;
+            case ESP_SLEEP_WAKEUP_EXT0: wakeup_name = "EXT0"; is_gpio_wakeup = true; break;
+            case ESP_SLEEP_WAKEUP_EXT1: wakeup_name = "EXT1"; is_gpio_wakeup = true; break;
+            case ESP_SLEEP_WAKEUP_TIMER: wakeup_name = "TIMER"; break;
+            case ESP_SLEEP_WAKEUP_GPIO: wakeup_name = "GPIO"; is_gpio_wakeup = true; break;
+            case ESP_SLEEP_WAKEUP_UART: wakeup_name = "UART"; break;
+            case ESP_SLEEP_WAKEUP_TOUCHPAD: wakeup_name = "TOUCHPAD"; break;
+            case ESP_SLEEP_WAKEUP_ULP: wakeup_name = "ULP"; break;
+            default: wakeup_name = "OTHER"; break;
+        }
+        ESP_LOGI(TAG, "[WAKEUP_DEBUG] Wakeup cause: %d (%s)", wakeup_cause, wakeup_name);
+        ESP_LOGI(TAG, "[WAKEUP_DEBUG] AI_BUTTON_GPIO: %d", AI_BUTTON_GPIO);
+        
+        // 检查EXT1唤醒状态（用于确认按键唤醒，作为备用检测）
+        bool ai_button_wakeup = false;
+        uint32_t ext1_wakeup_status = esp_sleep_get_ext1_wakeup_status();
+        ESP_LOGI(TAG, "[WAKEUP_DEBUG] EXT1 wakeup status: 0x%08X", ext1_wakeup_status);
+        if (ext1_wakeup_status != 0 && (ext1_wakeup_status & (1ULL << AI_BUTTON_GPIO))) {
+            ai_button_wakeup = true;
+            ESP_LOGI(TAG, "[WAKEUP_DEBUG] AI button wakeup detected via EXT1");
+        }
+        
+        // 读取当前AI按钮状态（调试用）
+        int ai_button_level = gpio_get_level((gpio_num_t)AI_BUTTON_GPIO);
+        ESP_LOGI(TAG, "[WAKEUP_DEBUG] Current AI button level: %d (HIGH=1, LOW=0)", ai_button_level);
+        
+        // 检查NVS中的唤醒标志（备用方案，防止DTR/RTS复位清除RTC内存）
+        bool nvs_button_wakeup = false;
+        bool nvs_timer_wakeup = false;
+        {
+            nvs_handle_t nvs_handle;
+            esp_err_t err = nvs_open(NVS_WAKEUP_NAMESPACE, NVS_READONLY, &nvs_handle);
+            if (err == ESP_OK) {
+                int32_t marker = WAKEUP_MARKER_INVALID;
+                err = nvs_get_i32(nvs_handle, NVS_KEY_MARKER, &marker);
+                if (err == ESP_OK && marker == WAKEUP_MARKER_VALID) {
+                    int32_t val;
+                    err = nvs_get_i32(nvs_handle, NVS_KEY_BUTTON_FLAG, &val);
+                    nvs_button_wakeup = (err == ESP_OK) && (val != 0);
+                    err = nvs_get_i32(nvs_handle, NVS_KEY_TIMER_FLAG, &val);
+                    nvs_timer_wakeup = (err == ESP_OK) && (val != 0);
+                    ESP_LOGI(TAG, "[RUNTIME] NVS wakeup flags - button:%d, timer:%d", 
+                             nvs_button_wakeup, nvs_timer_wakeup);
+                } else {
+                    ESP_LOGI(TAG, "[RUNTIME] NVS marker invalid (0x%04X)", marker);
+                }
+                nvs_close(nvs_handle);
+            } else {
+                ESP_LOGW(TAG, "[RUNTIME] Failed to open NVS namespace: %s", esp_err_to_name(err));
+            }
+        }
+        
         ESP_LOGI(TAG, "Initializing ESP32-S-N8D16-SSD1683-4.2 Board");
 
+        // 第二步：根据唤醒原因执行不同分支（标准做法）
+        bool is_wake_from_deep_sleep = false;
+        
+        if (wakeup_cause == ESP_SLEEP_WAKEUP_TIMER || nvs_timer_wakeup) {
+            // 定时器唤醒（优先使用esp_sleep_get_wakeup_cause，NVS标志作为备用）
+            ESP_LOGI(TAG, "[RUNTIME] Wake from deep sleep: TIMER (will not start chat)");
+            is_wake_from_deep_sleep = true;
+            in_deep_sleep_ = true;
+            wakeup_start_chat_ = false;  // 定时器唤醒不启动对话
+        } else if (is_gpio_wakeup || ai_button_wakeup || nvs_button_wakeup) {
+            // 按键唤醒（GPIO/EXT0/EXT1唤醒，或EXT1状态检测到按键，或NVS标志）
+            ESP_LOGI(TAG, "[RUNTIME] Wake from deep sleep: BUTTON (will start chat)");
+            is_wake_from_deep_sleep = true;
+            in_deep_sleep_ = true;
+            wakeup_start_chat_ = true;  // 按键唤醒才启动对话
+            
+            // 设置延迟唤醒标志，在初始化完成后处理
+            delayed_wakeup_ = true;
+        } else {
+            // 首次启动或其他原因
+            ESP_LOGI(TAG, "[RUNTIME] First boot (or unknown wakeup cause)");
+            is_wake_from_deep_sleep = false;
+            in_deep_sleep_ = false;
+            wakeup_start_chat_ = false;
+        }
+        
         InitializeI2c();
         InitializeButtons();
         InitializeTools();
@@ -515,37 +654,45 @@ public:
 
         // 设置网络事件回调
         SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
+            ESP_LOGI(TAG, "[RUNTIME] SetNetworkEventCallback called, event=%d", (int)event);
             HandleNetworkEventCallback(event, data);
         });
 
-        esp_sleep_wakeup_cause_t wakeup_cause = esp_sleep_get_wakeup_cause();
-        ESP_LOGI(TAG, "[RUNTIME] Wakeup cause: %d", wakeup_cause);
-        
-        if (wakeup_cause == ESP_SLEEP_WAKEUP_EXT0 || 
-            wakeup_cause == ESP_SLEEP_WAKEUP_EXT1 || 
-            wakeup_cause == ESP_SLEEP_WAKEUP_TIMER) {
-            if (wakeup_cause == ESP_SLEEP_WAKEUP_TIMER) {
-                ESP_LOGI(TAG, "[RUNTIME] Woken by timer (wake from deep sleep)");
+        // 第三步：根据唤醒原因执行不同逻辑
+        bool local_wakeup_start_chat = wakeup_start_chat_;  // 保存局部变量供 lambda 使用
+        if (is_wake_from_deep_sleep) {
+            if (local_wakeup_start_chat) {
+                // 按键唤醒：启动对话（延迟处理，等待display初始化完成）
+                ESP_LOGI(TAG, "[RUNTIME] Button wakeup detected, will handle after initialization");
             } else {
-                ESP_LOGI(TAG, "[RUNTIME] Woken by GPIO/EXT (wake from deep sleep)");
+                // 定时器唤醒：不启动对话，直接发送心跳和获取图片
+                ESP_LOGI(TAG, "[RUNTIME] Timer wakeup, sending heartbeat and fetching image...");
+                // 定时器唤醒应该跟首次启动一样的逻辑
+                display_->showAiChatStatus("IDLE", "INITIALIZING...");
+                
+                // 定时器唤醒也需要清除NVS标志
+                ClearNvsWakeupFlags();
             }
-            in_deep_sleep_ = true;
-            ESP_LOGI(TAG, "[RUNTIME] Calling WakeFromDeepSleep to start chat...");
-            WakeFromDeepSleep();
         } else {
-            ESP_LOGI(TAG, "[RUNTIME] First boot (not wake from deep sleep)");
-            in_deep_sleep_ = false;
-            
-            // 如果是第一次启动（非唤醒），显示初始页面
+            // 首次启动
             ESP_LOGI(TAG, "[RUNTIME] First boot, showing initial screen");
             display_->showAiChatStatus("IDLE", "INITIALIZING...");
         }
         
+        // 处理延迟唤醒（按键唤醒后，等待初始化完成）
+        if (delayed_wakeup_ && display_) {
+            ESP_LOGI(TAG, "[RUNTIME] Processing delayed wakeup...");
+            WakeFromDeepSleep();
+            delayed_wakeup_ = false;
+        }
+        
         // 检查 WiFi 是否已连接（防止回调设置前已连接）
         ESP_LOGI(TAG, "[INKSIGHT] Scheduling CheckAndInitializeInksight...");
-        Application::GetInstance().Schedule([this]() {
-            ESP_LOGI(TAG, "[INKSIGHT] CheckAndInitializeInksight scheduled task running");
-            CheckAndInitializeInksight();
+        Application::GetInstance().Schedule([this, is_wake_from_deep_sleep, local_wakeup_start_chat]() {
+            ESP_LOGI(TAG, "[INKSIGHT] CheckAndInitializeInksight scheduled task running, is_wake=%d, start_chat=%d", 
+                     is_wake_from_deep_sleep, local_wakeup_start_chat);
+            // 定时器唤醒和首次启动一样，is_wake_from_deep_sleep 传 false，会发送心跳和获取图片
+            CheckAndInitializeInksight(is_wake_from_deep_sleep && local_wakeup_start_chat);
         });
     }
 
@@ -580,8 +727,15 @@ public:
         return last_battery_voltage_;
     }
     
-    bool IsWakeFromDeepSleep() const { return in_deep_sleep_; }
+    bool IsWakeFromDeepSleep() override { return in_deep_sleep_; }
     bool IsWakeupFetchDone() const { return wakeup_fetch_done_; }
+    
+    // 检查唤醒后是否需要启动对话，并清除标志
+    bool CheckAndClearWakeupStartChat() {
+        bool result = wakeup_start_chat_;
+        wakeup_start_chat_ = false;
+        return result;
+    }
     
     void FetchImageAfterWake() {
         if (!wakeup_fetch_done_) {
@@ -594,6 +748,7 @@ public:
     void OnDeviceIdle() override {
         if (!wakeup_fetch_done_) {
             ESP_LOGI(TAG, "[INKSIGHT] Wake from deep sleep, fetching image after chat ended");
+            display_->SetSuppressAutoImageFetch(false);  // 重新启用自动获取图片
             wakeup_fetch_done_ = true;
             display_->FetchInksightImage();
         }
@@ -641,23 +796,28 @@ public:
         // 等待 WiFi 完全停止
         vTaskDelay(pdMS_TO_TICKS(200));
         
+        // 关键：保存 WiFi 配置到 RTC 内存，实现快速恢复
+        esp_err_t err = esp_wifi_restore();
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "[RUNTIME] WiFi config saved to RTC for quick restore");
+        } else {
+            ESP_LOGI(TAG, "[RUNTIME] WiFi restore result: %s (will need full reconnect)", esp_err_to_name(err));
+        }
+        
         // 关键：禁用所有唤醒源（清除之前的配置）
         esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
         
         // 配置RTC外设电源域，确保唤醒有效
         esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
         
-        // 配置AI按钮GPIO为输入模式，启用内部上拉
-        gpio_config_t ai_button_config = {};
-        ai_button_config.pin_bit_mask = (1ULL << AI_BUTTON_GPIO);
-        ai_button_config.mode = GPIO_MODE_INPUT;
-        ai_button_config.pull_up_en = GPIO_PULLUP_ENABLE;
-        ai_button_config.pull_down_en = GPIO_PULLDOWN_DISABLE;
-        ai_button_config.intr_type = GPIO_INTR_DISABLE;
-        gpio_config(&ai_button_config);
+        // 直接使用RTC GPIO配置（关键：不要混用gpio_config和rtc_gpio_init）
+        ESP_ERROR_CHECK(rtc_gpio_init((gpio_num_t)AI_BUTTON_GPIO));
+        ESP_ERROR_CHECK(rtc_gpio_set_direction((gpio_num_t)AI_BUTTON_GPIO, RTC_GPIO_MODE_INPUT_ONLY));
+        ESP_ERROR_CHECK(rtc_gpio_pullup_en((gpio_num_t)AI_BUTTON_GPIO));  // 启用上拉
+        ESP_ERROR_CHECK(rtc_gpio_pulldown_dis((gpio_num_t)AI_BUTTON_GPIO));  // 禁用下拉
         
         // 读取AI按钮状态，检查是否被按下
-        int ai_button_state = gpio_get_level((gpio_num_t)AI_BUTTON_GPIO);
+        int ai_button_state = rtc_gpio_get_level((gpio_num_t)AI_BUTTON_GPIO);
         ESP_LOGI(TAG, "[RUNTIME] AI button state before sleep: %s (GPIO%d)", 
                  ai_button_state ? "HIGH" : "LOW", AI_BUTTON_GPIO);
         
@@ -668,17 +828,32 @@ public:
             return;
         }
         
-        // 配置AI按钮GPIO为EXT1低电平唤醒
-        ESP_ERROR_CHECK(rtc_gpio_init((gpio_num_t)AI_BUTTON_GPIO));
-        ESP_ERROR_CHECK(rtc_gpio_pullup_en((gpio_num_t)AI_BUTTON_GPIO));  // 启用上拉
-        ESP_ERROR_CHECK(rtc_gpio_pulldown_dis((gpio_num_t)AI_BUTTON_GPIO));  // 禁用下拉
-        ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup(1ULL << AI_BUTTON_GPIO, ESP_EXT1_WAKEUP_ALL_LOW)); // 低电平唤醒
-        ESP_LOGI(TAG, "[RUNTIME] AI button wakeup enabled (GPIO%d, EXT1, ALL LOW)", AI_BUTTON_GPIO);
+        // 配置GPIO唤醒（使用普通GPIO唤醒，更稳定）
+        gpio_wakeup_enable((gpio_num_t)AI_BUTTON_GPIO, GPIO_INTR_LOW_LEVEL);
+        esp_sleep_enable_gpio_wakeup();
+        ESP_LOGI(TAG, "[RUNTIME] AI button wakeup enabled (GPIO%d, GPIO wakeup, LOW level)", AI_BUTTON_GPIO);
         
         // 配置定时器唤醒
         esp_sleep_enable_timer_wakeup(sleep_us);
         ESP_LOGI(TAG, "[RUNTIME] Timer wakeup enabled");
-        ESP_LOGI(TAG, "[RUNTIME] Now going to deep sleep now...");
+        
+        // 设置NVS唤醒标志（作为esp_sleep_get_wakeup_cause()的备用方案，防止DTR/RTS复位）
+        {
+            nvs_handle_t nvs_handle;
+            esp_err_t err = nvs_open(NVS_WAKEUP_NAMESPACE, NVS_READWRITE, &nvs_handle);
+            if (err == ESP_OK) {
+                nvs_set_i32(nvs_handle, NVS_KEY_MARKER, WAKEUP_MARKER_VALID);
+                nvs_set_i32(nvs_handle, NVS_KEY_BUTTON_FLAG, 1);   // 按键唤醒标志
+                nvs_set_i32(nvs_handle, NVS_KEY_TIMER_FLAG, 0);    // 定时器唤醒标志
+                nvs_commit(nvs_handle);
+                nvs_close(nvs_handle);
+                ESP_LOGI(TAG, "[RUNTIME] NVS wakeup flags set (button=1, timer=0)");
+            } else {
+                ESP_LOGW(TAG, "[RUNTIME] Failed to set NVS wakeup flags: %s", esp_err_to_name(err));
+            }
+        }
+        
+        ESP_LOGI(TAG, "[RUNTIME] Going to deep sleep...");
         esp_deep_sleep_start();
     }
 };

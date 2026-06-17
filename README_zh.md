@@ -28,15 +28,25 @@ v1 的稳定版本为 1.9.2，可以通过 `git checkout v1` 来切换到 v1 版
 - 采用 OPUS 音频编解码
 - 基于流式 ASR + LLM + TTS 架构的语音交互
 - 声纹识别，识别当前说话人的身份 [3D Speaker](https://github.com/modelscope/3D-Speaker)
-- OLED / LCD 显示屏，支持表情显示
-- 电量显示与电源管理
+- OLED / LCD / 墨水屏显示，支持表情显示
+- 电量显示与电源管理，支持休眠模式
 - 支持多语言（中文、英文、日文）
 - 支持 ESP32-C3、ESP32-S3、ESP32-P4 芯片平台
 - 通过设备端 MCP 实现设备控制（音量、灯光、电机、GPIO 等）
 - 通过云端 MCP 扩展大模型能力（智能家居控制、PC桌面操作、知识搜索、邮件收发等）
 - 自定义唤醒词、字体、表情与聊天背景，支持网页端在线修改 ([自定义Assets生成器](https://github.com/78/xiaozhi-assets-generator))
+- 通过 [inksight.site](https://inksight.site) 生成和显示 AI 图片
 
 ## 硬件
+
+### 新增墨水屏开发板
+
+本项目现在支持两款 4.2 英寸墨水屏开发板：
+
+| 开发板名称 | 显示驱动 | 分辨率 | 特性 |
+|------------|---------|--------|------|
+| `esp32-s-r8n16-ssd1683-4.2` | SSD1683 (兼容) | 400 x 300 | 黑白红三色 (BWR) |
+| `esp32s3-r8n16-uc8176-4.2` | UC8176 | 400 x 300 | 黑白红三色 (BWR) |
 
 ### 面包板手工制作实践
 
@@ -118,6 +128,48 @@ v1 的稳定版本为 1.9.2，可以通过 `git checkout v1` 来切换到 v1 版
 - 安装 ESP-IDF 插件，选择 SDK 版本 5.4 或以上
 - Linux 比 Windows 更好，编译速度快，也免去驱动问题的困扰
 - 本项目使用 Google C++ 代码风格，提交代码时请确保符合规范
+
+### 开发板选择
+
+要选择墨水屏开发板，请使用 `idf.py menuconfig` 并导航到：
+
+```
+Board Configuration → Board Type → Waveshare Boards
+```
+
+选择以下之一：
+- `waveshare/esp32-s-r8n16-ssd1683-4.2` (SSD1683 兼容)
+- `waveshare/esp32s3-r8n16-uc8176-4.2` (UC8176)
+
+### 电源管理
+
+固件支持电池供电的休眠模式：
+
+- **持续活跃模式 (Always Active)**: 设备保持唤醒状态，随时响应交互
+- **间隔模式 (Interval)**: 设备在交互间隙进入深度休眠以节省电量
+
+通过 `idf.py menuconfig` 配置：
+```
+Power Management → Runtime Mode
+```
+
+或通过服务器配置设置 `is_always_active: false`。
+
+### KEY-AI 唤醒功能
+
+按下 **KEY-AI** 按钮可以从休眠中唤醒设备，并进入小智对话模式进行语音交互。
+
+### Inksight 集成
+
+固件集成了 [inksight.site](https://inksight.site) 用于 AI 图片生成和显示：
+
+1. 设备将屏幕参数（分辨率、颜色）发送到服务器
+2. 服务器为墨水屏生成优化的图片
+3. 设备获取图片并显示在屏幕上
+
+### 硬件部分
+1. 已开源pcb版设计文件和原件表。请访问[https://oshwhub.com/laoguia/project_ybjwwrml](https://oshwhub.com/laoguia/project_ybjwwrml)
+2. 外壳文件 目录下的step文件。
 
 ### 开发者文档
 
